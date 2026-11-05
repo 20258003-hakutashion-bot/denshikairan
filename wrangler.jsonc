@@ -1,0 +1,13 @@
+{
+  "name": "denshikairan",
+  "main": "src/index.js",
+  "compatibility_date": "2025-09-01",
+  "workers_dev": true,
+  "kv_namespaces": [
+    {
+      "binding": "FILES",
+      "id": "f64bac8ec4024815965dc641dd0e3fda"
+    }
+  ],
+  "observability": { "enabled": true }
+}
