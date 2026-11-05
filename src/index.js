@@ -130,8 +130,10 @@ const newPage = () => page("グループを登録", `<h1>グループを登録</
 <button id="go" type="button">登録する</button><div id="m"></div></div>`, String.raw`
 const $=i=>document.getElementById(i);
 $("go").onclick=async()=>{const r=await fetch("/api/new",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({admin:$("ad").value,slug:$("sl").value.trim(),name:$("nm").value.trim(),pw:$("pw").value})}),d=await r.json().catch(()=>({}));
-const m=$("m");m.style.color=r.ok&&d.ok?"var(--g)":"var(--err)";
-m.textContent=r.ok&&d.ok?"登録しました。\n見る画面: "+location.origin+"/g/"+d.slug+"\n載せる画面: "+location.origin+"/g/"+d.slug+"/post":(d.message||"登録できませんでした。");m.style.whiteSpace="pre-wrap"};`);
+const m=$("m"),ok=r.ok&&d.ok;m.style.color=ok?"var(--g)":"var(--err)";m.textContent="";
+if(ok){const u=location.origin+"/g/"+d.slug;m.append("登録しました。");
+[["見る画面",u],["載せる画面",u+"/post"]].forEach(([n,h])=>{const p=document.createElement("div"),a=document.createElement("a");a.href=h;a.target="_blank";a.textContent=h;a.style.color="var(--g)";p.append(n+": ",a);m.append(p)})}
+else m.textContent=d.message||"登録できませんでした。"};`);
 async function apiNew(req, env) {
   const b = await req.json().catch(() => ({}));
   if (!env.ADMIN_PASS || b.admin !== env.ADMIN_PASS) return json({ ok: false, message: "管理用の合言葉が違います。" }, 403);
