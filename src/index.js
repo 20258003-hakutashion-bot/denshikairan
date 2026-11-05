@@ -126,7 +126,7 @@ const newPage = () => page("グループを登録", `<h1>グループを登録</
 <label>管理用の合言葉</label><input id="ad" type="password">
 <label>グループID(半角の小文字英数字とハイフン、2〜30文字)</label><input id="sl" placeholder="例: a-town">
 <label>グループの名前</label><input id="nm" maxlength="40" placeholder="例: A町内会">
-<label>載せる人用の合言葉(4文字以上)</label><input id="pw">
+<label>載せる人用の合言葉(半角の小文字英数字4文字以上)</label><input id="pw">
 <button id="go" type="button">登録する</button><div id="m"></div></div>`, String.raw`
 const $=i=>document.getElementById(i);
 $("go").onclick=async()=>{const r=await fetch("/api/new",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({admin:$("ad").value,slug:$("sl").value.trim(),name:$("nm").value.trim(),pw:$("pw").value})}),d=await r.json().catch(()=>({}));
