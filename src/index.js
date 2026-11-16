@@ -33,7 +33,19 @@ async function auth(slug, pw, env) {
   const g = await env.FILES.get("g:" + slug, "json");
   return g ? (g.h === await sha(slug + ":" + pw) ? g : false) : null;
 }
-const authErr = g => g === null ? json({ ok: false, message: "グループが見つかりません。" }, 404) : json({ ok: false, message: "合言葉が違います。" }, 403);
+const hmac = async (k, m) => {
+  const key = await crypto.subtle.importKey("raw", new TextEncoder().encode(k), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+  return [...new Uint8Array(await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(m)))].map(b => b.toString(16).padStart(2, "0")).join("");
+};
+// ログイン中か確認(クッキー)。OKならグループ情報、だめならnull
+async function session(req, env, slug) {
+  const t = (/(?:^|; )s=([^;]+)/.exec(req.headers.get("cookie") || "") || [])[1];
+  const [sl, exp, sig] = (t || "").split(".");
+  if (!sig || sl !== slug || !(+exp > Date.now()) || !env.ADMIN_PASS) return null;
+  const g = await env.FILES.get("g:" + slug, "json");
+  return g && sig === await hmac(env.ADMIN_PASS + g.h, sl + "." + exp) ? g : null;
+}
+const needLogin = () => json({ ok: false, message: "ログインし直してください。" }, 401);
 
 // ---- 見る画面(誰でも見られる) ----
 async function view(slug, env) {
@@ -47,46 +59,42 @@ async function view(slug, env) {
 }
 
 // ---- 載せる画面 ----
-async function postPage(slug, env, ok) {
-  const g = await env.FILES.get("g:" + slug, "json");
-  if (!g) return notFound();
+async function postPage(slug, env, ok, req) {
+  const g = await session(req, env, slug);
+  if (!g) return Response.redirect(new URL(req.url).origin + "/login?g=" + slug, 302);
   const idx = await env.FILES.get("i:" + slug, "json") || [];
   const list = idx.map(x => `<div class="c"><div class="d">${esc(x.d)}</div><div class="t">${esc(x.t)}</div><button class="r" data-id="${x.n}">この回覧を削除</button></div>`).join("");
   const body = `<h1>${esc(g.name)}<br>回覧を載せる</h1><div class="c">
-<label>合言葉</label><input id="pw" type="password" autocomplete="current-password">
 <button id="pick" type="button" style="background:none;color:var(--g);border:3px solid var(--g)">ファイル・写真を選ぶ</button>
 <input id="file" type="file" multiple hidden accept="image/*,application/pdf,.pdf,.doc,.docx">
 <div id="fn" class="t">まだ選んでいません</div>
 <label>題名(書かなくても大丈夫です)</label><input id="title" maxlength="100">
 <button id="send" type="button">載せる</button><div id="m" style="color:var(--g)">${ok ? "載せました。" : ""}</div></div>
-<h1 style="font-size:26px">載せたもの</h1>${list || `<div class="c">まだありません。</div>`}`;
+<button class="r" id="out" type="button" style="margin-bottom:24px">ログアウト</button><h1 style="font-size:26px">載せたもの</h1>${list || `<div class="c">まだありません。</div>`}`;
   return page("回覧を載せる", body, String.raw`
 const $=i=>document.getElementById(i),S="${slug}";
 const msg=(t,ok)=>{$("m").textContent=t;$("m").style.color=ok?"var(--g)":"var(--err)"};
-try{$("pw").value=localStorage.getItem("pw:"+S)||""}catch(e){}
 $("pick").onclick=()=>$("file").click();
+$("out").onclick=async()=>{await fetch("/api/logout",{method:"POST"});location.href="/login?g="+S};
 $("file").onchange=()=>{$("fn").textContent=[...$("file").files].map(f=>f.name).join("、")||"まだ選んでいません"};
 async function shrink(f){if(!f.type.startsWith("image/"))return f;try{const b=await createImageBitmap(f),s=Math.min(1,2000/Math.max(b.width,b.height)),c=document.createElement("canvas");c.width=Math.round(b.width*s);c.height=Math.round(b.height*s);const x=c.getContext("2d");x.fillStyle="#fff";x.fillRect(0,0,c.width,c.height);x.drawImage(b,0,0,c.width,c.height);return await new Promise(r=>c.toBlob(r,"image/jpeg",.85))}catch(e){return f}}
 $("send").onclick=async()=>{
 const fs=[...$("file").files];if(!fs.length)return msg("先にファイルを選んでください。");
-const pw=$("pw").value;if(!pw)return msg("合言葉を入れてください。");
 $("send").disabled=true;
 try{for(let i=0;i<fs.length;i++){msg("送っています… ("+(i+1)+"/"+fs.length+")",true);
-const fd=new FormData();fd.append("pw",pw);fd.append("title",$("title").value||fs[i].name.replace(/\.[^.]*$/,""));fd.append("file",await shrink(fs[i]),fs[i].name);
+const fd=new FormData();fd.append("title",$("title").value||fs[i].name.replace(/\.[^.]*$/,""));fd.append("file",await shrink(fs[i]),fs[i].name);
 const r=await fetch("/api/post/"+S,{method:"POST",body:fd}),d=await r.json().catch(()=>({}));
 if(!r.ok||!d.ok)throw new Error(d.message||"うまく載せられませんでした。")}
-try{localStorage.setItem("pw:"+S,pw)}catch(e){}
 location.href=location.pathname+"?ok=1"}catch(e){msg(e.message)}finally{$("send").disabled=false}};
 document.querySelectorAll("button.r").forEach(b=>b.onclick=async()=>{
 if(!confirm("この回覧を削除します。よろしいですか?"))return;
-const r=await fetch("/api/del/"+S,{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({pw:$("pw").value,id:b.dataset.id})}),d=await r.json().catch(()=>({}));
+const r=await fetch("/api/del/"+S,{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({id:b.dataset.id})}),d=await r.json().catch(()=>({}));
 if(r.ok&&d.ok)location.href=location.pathname;else msg(d.message||"削除できませんでした。")});`);
 }
 
 async function apiPost(slug, req, env) {
+  if (!await session(req, env, slug)) return needLogin();
   const fd = await req.formData();
-  const g = await auth(slug, String(fd.get("pw") || ""), env);
-  if (!g) return authErr(g);
   const file = fd.get("file");
   if (!file || typeof file === "string") return json({ ok: false, message: "ファイルがありません。" }, 400);
   if (file.size > MAX) return json({ ok: false, message: "ファイルが大きすぎます(1つ10MBまで)。" }, 413);
@@ -102,8 +110,8 @@ async function apiPost(slug, req, env) {
   return json({ ok: true });
 }
 async function apiDel(slug, req, env) {
-  const b = await req.json().catch(() => ({})), g = await auth(slug, String(b.pw || ""), env);
-  if (!g) return authErr(g);
+  if (!await session(req, env, slug)) return needLogin();
+  const b = await req.json().catch(() => ({}));
   const idx = await env.FILES.get("i:" + slug, "json") || [];
   if (idx.some(x => x.n === b.id)) {
     await env.FILES.delete("f:" + b.id);
@@ -120,6 +128,24 @@ async function file(n, env) {
   if (ext.startsWith("doc")) h["content-disposition"] = `attachment; filename="kairan.${ext}"`;
   return new Response(body, { headers: h });
 }
+
+// ---- ログイン ----
+const loginPage = g => page("ログイン", `<h1>ログイン</h1><div class="c">
+<label>グループID</label><input id="sl" value="${esc(g)}" autocomplete="username">
+<label>合言葉</label><input id="pw" type="password" autocomplete="current-password">
+<button id="go" type="button">ログイン</button><div id="m" style="color:var(--err)"></div></div>`, String.raw`
+const $=i=>document.getElementById(i);
+$("go").onclick=async()=>{const r=await fetch("/api/login",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({slug:$("sl").value.trim(),pw:$("pw").value})}),d=await r.json().catch(()=>({}));
+if(r.ok&&d.ok)location.href="/g/"+d.slug+"/post";else $("m").textContent=d.message||"ログインできませんでした。"};`);
+async function apiLogin(req, env) {
+  const b = await req.json().catch(() => ({})), slug = String(b.slug || "");
+  const g = new RegExp(`^${SLUG}$`).test(slug) && env.ADMIN_PASS ? await auth(slug, String(b.pw || ""), env) : null;
+  if (!g) return json({ ok: false, message: "グループIDか合言葉が違います。" }, 403);
+  const exp = Date.now() + 30 * 864e5;
+  return new Response(JSON.stringify({ ok: true, slug }), { headers: { "content-type": "application/json; charset=utf-8",
+    "set-cookie": `s=${slug}.${exp}.${await hmac(env.ADMIN_PASS + g.h, slug + "." + exp)}; Path=/; Max-Age=${30 * 86400}; HttpOnly; Secure; SameSite=Lax` } });
+}
+const apiLogout = () => new Response(JSON.stringify({ ok: true }), { headers: { "content-type": "application/json", "set-cookie": "s=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Lax" } });
 
 // ---- グループ登録(管理用の合言葉が必要) ----
 const newPage = () => page("グループを登録", `<h1>グループを登録</h1><div class="c">
@@ -150,9 +176,12 @@ export default {
       let r;
       if (p === "/") return page("回覧板", `<h1>回覧板</h1><div class="c">グループごとのアドレスを開いてください。</div>`);
       if (p === "/new") return newPage();
+      if (p === "/login") return loginPage(u.searchParams.get("g") || "");
+      if (p === "/api/login" && post) return apiLogin(req, env);
+      if (p === "/api/logout" && post) return apiLogout();
       if (p === "/api/new" && post) return apiNew(req, env);
       if ((r = new RegExp(`^/g/(${SLUG})/?$`).exec(p))) return view(r[1], env);
-      if ((r = new RegExp(`^/g/(${SLUG})/post/?$`).exec(p))) return postPage(r[1], env, u.searchParams.has("ok"));
+      if ((r = new RegExp(`^/g/(${SLUG})/post/?$`).exec(p))) return postPage(r[1], env, u.searchParams.has("ok"), req);
       if (post && (r = new RegExp(`^/api/post/(${SLUG})$`).exec(p))) return apiPost(r[1], req, env);
       if (post && (r = new RegExp(`^/api/del/(${SLUG})$`).exec(p))) return apiDel(r[1], req, env);
       if ((r = /^\/f\/([0-9a-f]{32}\.[a-z]+)$/.exec(p))) return file(r[1], env);
