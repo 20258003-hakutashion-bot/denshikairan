@@ -28,11 +28,6 @@ function detect(b) {
   return s(0x25, 0x50, 0x44, 0x46) ? "pdf" : s(0xff, 0xd8, 0xff) ? "jpg" : s(0x89, 0x50, 0x4e, 0x47) ? "png"
     : s(0xd0, 0xcf, 0x11, 0xe0) ? "doc" : s(0x50, 0x4b, 0x03, 0x04) ? "docx" : null;
 }
-// 合言葉の確認: グループなし→null / 違う→false / OK→グループ情報
-async function auth(slug, pw, env) {
-  const g = await env.FILES.get("g:" + slug, "json");
-  return g ? (g.h === await sha(slug + ":" + pw) ? g : false) : null;
-}
 const hmac = async (k, m) => {
   const key = await crypto.subtle.importKey("raw", new TextEncoder().encode(k), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
   return [...new Uint8Array(await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(m)))].map(b => b.toString(16).padStart(2, "0")).join("");
@@ -129,6 +124,19 @@ async function file(n, env) {
   return new Response(body, { headers: h });
 }
 
+// ---- 5回続けて間違えるとロック(回線ごと。15分→30分→60分と延びる) ----
+const ipKey = req => { const ip = req.headers.get("cf-connecting-ip") || "?"; return ip.includes(":") ? ip.split(":").slice(0, 4).join(":") : ip; };
+const fmt = m => m >= 60 ? Math.ceil(m / 60) + "時間" : m + "分";
+const waitOf = l => l && l.until > Date.now() ? Math.ceil((l.until - Date.now()) / 6e4) : 0;
+const lockMsg = m => `続けて間違えたため、ロックされています。あと${fmt(m)}ほどたってから、もう一度ためしてください。`;
+async function miss(env, key, l, what) {
+  const n = ((l && l.n) || 0) + 1, until = n % 5 ? (l && l.until) || 0 : Date.now() + Math.min(15 * 2 ** (n / 5 - 1), 60) * 6e4;
+  await env.FILES.put(key, JSON.stringify({ n, until }), { expirationTtl: 86400 });
+  const w = waitOf({ until });
+  return w ? json({ ok: false, message: lockMsg(w) }, 429)
+    : json({ ok: false, message: `${what}が違います。(あと${5 - n % 5}回間違えると、しばらく使えなくなります)` }, 403);
+}
+
 // ---- ログイン ----
 const loginPage = g => page("ログイン", `<h1>ログイン</h1><div class="c">
 <label>グループID</label><input id="sl" value="${esc(g)}" autocomplete="username">
@@ -139,8 +147,12 @@ $("go").onclick=async()=>{const r=await fetch("/api/login",{method:"POST",header
 if(r.ok&&d.ok)location.href="/g/"+d.slug+"/post";else $("m").textContent=d.message||"ログインできませんでした。"};`);
 async function apiLogin(req, env) {
   const b = await req.json().catch(() => ({})), slug = String(b.slug || "");
-  const g = new RegExp(`^${SLUG}$`).test(slug) && env.ADMIN_PASS ? await auth(slug, String(b.pw || ""), env) : null;
+  const g = new RegExp(`^${SLUG}$`).test(slug) && env.ADMIN_PASS ? await env.FILES.get("g:" + slug, "json") : null;
   if (!g) return json({ ok: false, message: "グループIDか合言葉が違います。" }, 403);
+  const lk = "l:" + slug + ":" + ipKey(req), l = await env.FILES.get(lk, "json"), w = waitOf(l);
+  if (w) return json({ ok: false, message: lockMsg(w) }, 429);
+  if (g.h !== await sha(slug + ":" + String(b.pw || ""))) return miss(env, lk, l, "グループIDか合言葉");
+  if (l) await env.FILES.delete(lk);
   const exp = Date.now() + 30 * 864e5;
   return new Response(JSON.stringify({ ok: true, slug }), { headers: { "content-type": "application/json; charset=utf-8",
     "set-cookie": `s=${slug}.${exp}.${await hmac(env.ADMIN_PASS + g.h, slug + "." + exp)}; Path=/; Max-Age=${30 * 86400}; HttpOnly; Secure; SameSite=Lax` } });
@@ -162,10 +174,15 @@ if(ok){const u=location.origin+"/g/"+d.slug;m.append("登録しました。");
 else m.textContent=d.message||"登録できませんでした。"};`);
 async function apiNew(req, env) {
   const b = await req.json().catch(() => ({}));
-  if (!env.ADMIN_PASS || b.admin !== env.ADMIN_PASS) return json({ ok: false, message: "管理用の合言葉が違います。" }, 403);
+  const lk = "l:~admin:" + ipKey(req), l = await env.FILES.get(lk, "json"), w = waitOf(l);
+  if (w) return json({ ok: false, message: lockMsg(w) }, 429);
+  if (!env.ADMIN_PASS || b.admin !== env.ADMIN_PASS) return miss(env, lk, l, "管理用の合言葉");
+  if (l) await env.FILES.delete(lk);
   if (!new RegExp(`^${SLUG}$`).test(b.slug || "")) return json({ ok: false, message: "グループIDは半角の小文字英数字とハイフンで、2〜30文字にしてください。" }, 400);
   if (!b.name || b.name.length > 40 || !b.pw || b.pw.length < 4) return json({ ok: false, message: "名前と、4文字以上の合言葉を入れてください。" }, 400);
   await env.FILES.put("g:" + b.slug, JSON.stringify({ name: b.name, h: await sha(b.slug + ":" + b.pw) }));
+  const ks = await env.FILES.list({ prefix: "l:" + b.slug + ":" });
+  await Promise.all(ks.keys.map(k => env.FILES.delete(k.name)));
   return json({ ok: true, slug: b.slug });
 }
 
