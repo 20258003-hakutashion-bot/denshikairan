@@ -81,7 +81,7 @@ const fd=new FormData();fd.append("title",$("title").value||fs[i].name.replace(/
 const r=await fetch("/api/post/"+S,{method:"POST",body:fd}),d=await r.json().catch(()=>({}));
 if(!r.ok||!d.ok)throw new Error(d.message||"うまく載せられませんでした。")}
 location.href=location.pathname+"?ok=1"}catch(e){msg(e.message)}finally{$("send").disabled=false}};
-document.querySelectorAll("button.r").forEach(b=>b.onclick=async()=>{
+document.querySelectorAll("button[data-id]").forEach(b=>b.onclick=async()=>{
 if(!confirm("この回覧を削除します。よろしいですか?"))return;
 const r=await fetch("/api/del/"+S,{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({id:b.dataset.id})}),d=await r.json().catch(()=>({}));
 if(r.ok&&d.ok)location.href=location.pathname;else msg(d.message||"削除できませんでした。")});`);
